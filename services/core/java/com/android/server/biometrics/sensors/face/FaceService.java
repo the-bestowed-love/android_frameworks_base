@@ -21,6 +21,7 @@ import static android.Manifest.permission.MANAGE_FACE;
 import static android.Manifest.permission.USE_BIOMETRIC_INTERNAL;
 
 import android.annotation.NonNull;
+import android.app.ActivityManager;
 import android.annotation.Nullable;
 import android.app.ActivityManager;
 import android.content.Context;
@@ -33,12 +34,14 @@ import android.hardware.biometrics.IBiometricStateListener;
 import android.hardware.biometrics.IInvalidationCallback;
 import android.hardware.biometrics.ITestSession;
 import android.hardware.biometrics.ITestSessionCallback;
+import android.hardware.biometrics.SensorProperties;
 import android.hardware.biometrics.face.IFace;
 import android.hardware.biometrics.face.SensorProps;
 import android.hardware.face.Face;
 import android.hardware.face.FaceAuthenticateOptions;
 import android.hardware.face.FaceEnrollOptions;
 import android.hardware.face.FaceSensorConfigurations;
+import android.hardware.face.FaceSensorProperties;
 import android.hardware.face.FaceSensorPropertiesInternal;
 import android.hardware.face.FaceServiceReceiver;
 import android.hardware.face.IFaceAuthenticatorsRegisteredCallback;
@@ -72,6 +75,8 @@ import com.android.server.biometrics.sensors.ClientMonitorCallbackConverter;
 import com.android.server.biometrics.sensors.LockoutResetDispatcher;
 import com.android.server.biometrics.sensors.LockoutTracker;
 import com.android.server.biometrics.sensors.face.aidl.FaceProvider;
+import com.android.server.biometrics.sensors.face.sense.SenseProvider;
+import com.android.server.biometrics.sensors.face.sense.SenseUtils;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -663,7 +668,7 @@ public class FaceService extends SystemService {
                 FaceSensorConfigurations faceSensorConfigurations) {
             super.registerAuthenticators_enforcePermission();
 
-            if (!faceSensorConfigurations.hasSensorConfigurations()) {
+            if (!faceSensorConfigurations.hasSensorConfigurations() && !SenseUtils.canUseProvider()) {
                 Slog.d(TAG, "No face sensors to register.");
                 return;
             }
@@ -672,6 +677,17 @@ public class FaceService extends SystemService {
 
         private List<ServiceProvider> getProviders(
                 FaceSensorConfigurations faceSensorConfigurations) {
+            if (SenseUtils.canUseProvider()) {
+                final FaceSensorPropertiesInternal props = new FaceSensorPropertiesInternal(
+                        SenseProvider.DEVICE_ID, SensorProperties.STRENGTH_WEAK,
+                        1 /* maxEnrollmentsPerUser */, List.of(), FaceSensorProperties.TYPE_RGB,
+                        false /* supportsFaceDetection */, false /* supportsSelfIllumination */,
+                        false /* resetLockoutRequiresChallenge */);
+                final SenseProvider provider = new SenseProvider(getContext(),
+                        mBiometricStateCallback, props, mLockoutResetDispatcher);
+                provider.bindForUnlockedUser(ActivityManager.getCurrentUser());
+                return List.of(provider);
+            }
             final List<ServiceProvider> providers = new ArrayList<>();
             final Pair<String, SensorProps[]> filteredSensorProps = filterAvailableHalInstances(
                             faceSensorConfigurations);
@@ -783,6 +799,14 @@ public class FaceService extends SystemService {
     @Override
     public void onStart() {
         publishBinderService(Context.FACE_SERVICE, mServiceWrapper);
+    }
+
+    @Override
+    public void onUserUnlocked(@NonNull TargetUser user) {
+        final ServiceProvider provider = mRegistry.getProviderForSensor(SenseProvider.DEVICE_ID);
+        if (provider instanceof SenseProvider senseProvider) {
+            senseProvider.bindForUnlockedUser(user.getUserIdentifier());
+        }
     }
 
     /**
